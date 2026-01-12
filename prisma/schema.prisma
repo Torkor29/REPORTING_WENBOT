@@ -1,0 +1,714 @@
+// Prisma schema for Investor Reporting Hub
+// Production-ready schema with all entities
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// AUTHENTICATION & USER MANAGEMENT
+// ============================================
+
+enum Role {
+  ADMIN
+  EDITOR
+  VIEWER
+}
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  PENDING
+}
+
+model User {
+  id             String        @id @default(cuid())
+  email          String        @unique
+  name           String?
+  password       String?       // Hashed, null if OAuth only
+  role           Role          @default(VIEWER)
+  status         AccountStatus @default(PENDING)
+  emailVerified  DateTime?
+  image          String?
+
+  // Relations
+  accounts       Account[]
+  sessions       Session[]
+  articles       Article[]     @relation("AuthoredArticles")
+  reviews        Article[]     @relation("ReviewedArticles")
+  tradeNotes     TradeNote[]
+  auditLogs      AuditLog[]    @relation("Actor")
+  invitesSent    Invite[]      @relation("InviteSender")
+
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([email])
+  @@index([role])
+}
+
+model Account {
+  id                 String  @id @default(cuid())
+  userId             String
+  type               String
+  provider           String
+  providerAccountId  String
+  refresh_token      String? @db.Text
+  access_token       String? @db.Text
+  expires_at         Int?
+  token_type         String?
+  scope              String?
+  id_token           String? @db.Text
+  session_state      String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// Allowlist for email-based access control
+model AllowedEmail {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  role      Role     @default(VIEWER)
+  note      String?
+  addedBy   String?  // User ID who added
+
+  createdAt DateTime @default(now())
+  expiresAt DateTime?
+
+  @@index([email])
+}
+
+// Allowed domains for domain-based auth
+model AllowedDomain {
+  id        String   @id @default(cuid())
+  domain    String   @unique  // e.g., "company.com"
+  role      Role     @default(VIEWER)
+  isActive  Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+
+  @@index([domain])
+}
+
+// Invite system
+model Invite {
+  id        String   @id @default(cuid())
+  email     String
+  role      Role     @default(VIEWER)
+  token     String   @unique
+
+  senderId  String
+  sender    User     @relation("InviteSender", fields: [senderId], references: [id])
+
+  usedAt    DateTime?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([email])
+  @@index([token])
+}
+
+// ============================================
+// AUDIT LOGGING
+// ============================================
+
+enum AuditAction {
+  USER_LOGIN
+  USER_LOGOUT
+  USER_INVITE
+  USER_ROLE_CHANGE
+  USER_SUSPEND
+  ARTICLE_CREATE
+  ARTICLE_EDIT
+  ARTICLE_PUBLISH
+  ARTICLE_DELETE
+  SOURCE_ADD
+  SOURCE_EDIT
+  SOURCE_DELETE
+  JOB_RUN_MANUAL
+  JOB_CONFIG_CHANGE
+  SETTING_CHANGE
+  SHARE_LINK_CREATE
+  SHARE_LINK_REVOKE
+  DISCORD_WEBHOOK_CONFIG
+  PROMPT_EDIT
+}
+
+model AuditLog {
+  id        String      @id @default(cuid())
+  action    AuditAction
+  actorId   String
+  actor     User        @relation("Actor", fields: [actorId], references: [id])
+  targetId  String?     // ID of affected entity
+  targetType String?    // Type of affected entity
+  metadata  Json?       // Additional context
+  ipAddress String?
+  userAgent String?
+
+  createdAt DateTime    @default(now())
+
+  @@index([actorId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+// ============================================
+// NEWS & CONTENT SOURCES
+// ============================================
+
+enum SourceType {
+  RSS
+  API
+  SCRAPER
+  MANUAL
+}
+
+enum SourceCategory {
+  MACRO
+  CRYPTO
+  GEOPOLITICS
+  MARKETS
+  REGULATION
+}
+
+model Source {
+  id          String         @id @default(cuid())
+  name        String
+  type        SourceType
+  url         String
+  category    SourceCategory
+  trustScore  Int            @default(50) // 0-100
+  language    String         @default("en")
+  region      String?
+  isActive    Boolean        @default(true)
+  lastFetch   DateTime?
+  fetchErrors Int            @default(0)
+
+  // Config specific to source type
+  config      Json?          // API keys, selectors, etc.
+
+  rawArticles RawArticle[]
+
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([category])
+  @@index([isActive])
+}
+
+// Raw articles from sources (before processing)
+model RawArticle {
+  id          String   @id @default(cuid())
+  sourceId    String
+  source      Source   @relation(fields: [sourceId], references: [id])
+
+  externalId  String?  // ID from source
+  title       String
+  content     String   @db.Text
+  summary     String?  @db.Text
+  url         String
+  author      String?
+  publishedAt DateTime
+
+  // Processing status
+  isProcessed Boolean  @default(false)
+  isDuplicate Boolean  @default(false)
+  duplicateOf String?  // ID of original if duplicate
+
+  // Scoring (from Ranker agent)
+  relevanceScore Float?
+  impactScore    Float?
+
+  // Clustering
+  clusterId   String?
+  cluster     EventCluster? @relation(fields: [clusterId], references: [id])
+
+  metadata    Json?
+
+  createdAt   DateTime @default(now())
+
+  @@unique([sourceId, externalId])
+  @@index([sourceId])
+  @@index([publishedAt])
+  @@index([isProcessed])
+  @@index([clusterId])
+}
+
+// ============================================
+// EVENT CLUSTERING
+// ============================================
+
+model EventCluster {
+  id          String         @id @default(cuid())
+  title       String
+  category    SourceCategory
+  summary     String?        @db.Text
+  confidence  Float          @default(0.5)
+
+  rawArticles RawArticle[]
+  weeklyDigests WeeklyDigestCluster[]
+
+  startDate   DateTime
+  endDate     DateTime?
+
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([category])
+  @@index([startDate])
+}
+
+// ============================================
+// ARTICLES & REPORTS
+// ============================================
+
+enum ArticleType {
+  WEEKLY_DIGEST
+  MONTHLY_REPORT
+  MANUAL_ANALYSIS
+  INCIDENT
+  STRATEGY_CHANGE
+  TRADE_REVIEW
+}
+
+enum ArticleStatus {
+  DRAFT
+  IN_REVIEW
+  PUBLISHED
+  ARCHIVED
+}
+
+model Article {
+  id          String        @id @default(cuid())
+  type        ArticleType
+  status      ArticleStatus @default(DRAFT)
+
+  title       String
+  slug        String        @unique
+  content     String        @db.Text  // Markdown content
+  summary     String?       @db.Text
+  excerpt     String?       // Short excerpt for lists
+
+  // Metadata
+  coverImage  String?
+  tags        String[]
+
+  // Author & Review
+  authorId    String
+  author      User          @relation("AuthoredArticles", fields: [authorId], references: [id])
+  reviewerId  String?
+  reviewer    User?         @relation("ReviewedArticles", fields: [reviewerId], references: [id])
+
+  // Time period (for digests/reports)
+  periodStart DateTime?
+  periodEnd   DateTime?
+
+  // Citations
+  citations   Citation[]
+
+  // Versions
+  versions    ArticleVersion[]
+
+  // Sharing
+  shareLinks  ShareLink[]
+
+  // Discord
+  discordPostedAt DateTime?
+  discordMessageId String?
+
+  publishedAt DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([type])
+  @@index([status])
+  @@index([authorId])
+  @@index([periodStart])
+}
+
+// Article version history
+model ArticleVersion {
+  id        String   @id @default(cuid())
+  articleId String
+  article   Article  @relation(fields: [articleId], references: [id], onDelete: Cascade)
+
+  content   String   @db.Text
+  summary   String?  @db.Text
+  editedBy  String
+  comment   String?  // Why this edit was made
+
+  version   Int
+  createdAt DateTime @default(now())
+
+  @@unique([articleId, version])
+  @@index([articleId])
+}
+
+// Citations for articles
+model Citation {
+  id        String   @id @default(cuid())
+  articleId String
+  article   Article  @relation(fields: [articleId], references: [id], onDelete: Cascade)
+
+  title     String
+  url       String
+  source    String?
+  quote     String?  @db.Text
+  accessedAt DateTime @default(now())
+
+  @@index([articleId])
+}
+
+// Weekly digest to cluster relation
+model WeeklyDigestCluster {
+  id          String       @id @default(cuid())
+  articleId   String
+  clusterId   String
+  cluster     EventCluster @relation(fields: [clusterId], references: [id])
+
+  order       Int          @default(0)
+
+  createdAt   DateTime     @default(now())
+
+  @@unique([articleId, clusterId])
+  @@index([articleId])
+}
+
+// ============================================
+// SHARE LINKS (PUBLIC ACCESS)
+// ============================================
+
+model ShareLink {
+  id        String   @id @default(cuid())
+  articleId String
+  article   Article  @relation(fields: [articleId], references: [id], onDelete: Cascade)
+
+  token     String   @unique
+
+  // Access control
+  expiresAt DateTime?
+  revokedAt DateTime?
+  maxViews  Int?
+  viewCount Int      @default(0)
+
+  // Tracking
+  lastViewedAt DateTime?
+
+  createdBy String
+  createdAt DateTime @default(now())
+
+  @@index([token])
+  @@index([articleId])
+}
+
+// ============================================
+// TRADING DATA
+// ============================================
+
+enum TradeDirection {
+  LONG
+  SHORT
+}
+
+enum TradeStatus {
+  OPEN
+  CLOSED
+  CANCELLED
+}
+
+model Trade {
+  id          String         @id @default(cuid())
+
+  // External reference
+  externalId  String?        @unique
+
+  // Trade details
+  instrument  String         // BTC-USDT, ETH-USDT, etc.
+  direction   TradeDirection
+  status      TradeStatus    @default(CLOSED)
+
+  // Sizing
+  size        Float
+  leverage    Float?
+
+  // Prices
+  entryPrice  Float
+  exitPrice   Float?
+  stopLoss    Float?
+  takeProfit  Float?
+
+  // Results
+  pnl         Float?
+  pnlPercent  Float?
+  fees        Float?
+
+  // Timing
+  entryTime   DateTime
+  exitTime    DateTime?
+  duration    Int?           // In seconds
+
+  // Classification
+  tags        String[]
+  strategyId  String?
+
+  // Notes
+  notes       TradeNote[]
+
+  // Attachments (screenshots)
+  attachments TradeAttachment[]
+
+  metadata    Json?
+
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([instrument])
+  @@index([entryTime])
+  @@index([status])
+}
+
+model TradeNote {
+  id        String   @id @default(cuid())
+  tradeId   String
+  trade     Trade    @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id])
+
+  // Note content
+  intention String?  @db.Text  // Why the trade was taken
+  context   String?  @db.Text  // Market context
+  rules     String?  @db.Text  // Strategy rules triggered
+  result    String?  @db.Text  // Outcome analysis
+  lessons   String?  @db.Text  // What was learned
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tradeId])
+  @@index([authorId])
+}
+
+model TradeAttachment {
+  id        String   @id @default(cuid())
+  tradeId   String
+  trade     Trade    @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+
+  type      String   // image, document, etc.
+  filename  String
+  url       String
+  size      Int?
+
+  caption   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([tradeId])
+}
+
+// ============================================
+// SCHEDULED JOBS
+// ============================================
+
+enum JobType {
+  WEEKLY_COLLECT
+  WEEKLY_PROCESS
+  WEEKLY_WRITE
+  MONTHLY_GENERATE
+  SOURCE_FETCH
+  CLEANUP
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model JobRun {
+  id        String    @id @default(cuid())
+  type      JobType
+  status    JobStatus @default(PENDING)
+
+  // Timing
+  startedAt DateTime?
+  finishedAt DateTime?
+  duration  Int?      // In milliseconds
+
+  // Triggering
+  triggeredBy String? // User ID or "scheduler"
+  isManual   Boolean  @default(false)
+
+  // Results
+  logs      String[]
+  errors    String[]
+  metadata  Json?     // Job-specific output data
+
+  // Retry info
+  attempt   Int       @default(1)
+  maxAttempts Int     @default(3)
+
+  createdAt DateTime  @default(now())
+
+  @@index([type])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model JobSchedule {
+  id          String   @id @default(cuid())
+  type        JobType  @unique
+
+  // Cron expression
+  cronExpr    String   // e.g., "0 8 * * 1" for Monday 8 AM
+  timezone    String   @default("UTC")
+
+  // Settings
+  isActive    Boolean  @default(true)
+  lastRunAt   DateTime?
+  nextRunAt   DateTime?
+
+  config      Json?    // Job-specific config
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ============================================
+// LLM PROMPT TEMPLATES
+// ============================================
+
+enum PromptAgent {
+  COLLECTOR
+  RANKER
+  CLUSTERER
+  WRITER
+  RISK_COMPLIANCE
+  MONTHLY_SYNTHESIZER
+  EDITOR_ASSISTANT
+}
+
+model PromptTemplate {
+  id          String      @id @default(cuid())
+  agent       PromptAgent @unique
+
+  name        String
+  description String?
+
+  // Current active prompt
+  template    String      @db.Text
+
+  // Versioning
+  version     Int         @default(1)
+  versions    PromptVersion[]
+
+  // Testing
+  lastTestedAt DateTime?
+  testResults  Json?
+
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+}
+
+model PromptVersion {
+  id          String         @id @default(cuid())
+  templateId  String
+  template    PromptTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  content     String         @db.Text
+  version     Int
+  editedBy    String
+  comment     String?
+
+  createdAt   DateTime       @default(now())
+
+  @@unique([templateId, version])
+  @@index([templateId])
+}
+
+// ============================================
+// SETTINGS & CONFIGURATION
+// ============================================
+
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json
+  category  String   @default("general")
+
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@index([category])
+}
+
+model DiscordWebhook {
+  id          String   @id @default(cuid())
+  name        String
+  webhookUrl  String
+  channelName String?
+
+  // What to post
+  postWeekly  Boolean  @default(true)
+  postMonthly Boolean  @default(true)
+  autoPost    Boolean  @default(false) // Auto or manual validation
+
+  // Template
+  template    String?  @db.Text
+
+  isActive    Boolean  @default(true)
+  lastPostedAt DateTime?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ============================================
+// MARKET DATA CACHE
+// ============================================
+
+model MarketDataCache {
+  id          String   @id @default(cuid())
+  symbol      String
+  dataType    String   // price, volume, dominance, etc.
+  timeframe   String   // 1h, 1d, 1w, etc.
+
+  data        Json
+
+  fetchedAt   DateTime @default(now())
+  expiresAt   DateTime
+
+  @@unique([symbol, dataType, timeframe])
+  @@index([symbol])
+  @@index([expiresAt])
+}
