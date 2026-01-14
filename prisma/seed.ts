@@ -1,8 +1,11 @@
 import { PrismaClient, Role, AccountStatus, SourceType, SourceCategory, JobType, PromptAgent, ArticleType, ArticleStatus, TradeDirection, TradeStatus } from "@prisma/client"
 import { hash } from "bcryptjs"
 import { subDays, subWeeks, format } from "date-fns"
+import "dotenv/config"
 
-const prisma = new PrismaClient()
+const prisma = new PrismaClient({
+  datasourceUrl: process.env.DATABASE_URL,
+})
 
 async function main() {
   console.log("Starting seed...")
