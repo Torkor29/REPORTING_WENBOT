@@ -2,6 +2,16 @@ import OpenAI from "openai"
 import { prisma } from "@/lib/db"
 import { PromptAgent } from "@prisma/client"
 
+// Using Groq's free API (compatible with OpenAI SDK)
+// Free tier: 30 requests/minute, Llama 3.1 70B
+const groq = new OpenAI({
+  apiKey: process.env.GROQ_API_KEY,
+  baseURL: "https://api.groq.com/openai/v1",
+})
+
+// Default model - Llama 3.1 70B (best free model)
+const DEFAULT_MODEL = "llama-3.1-70b-versatile"
+
 export interface AgentResult<T = unknown> {
   success: boolean
   data?: T
@@ -13,16 +23,14 @@ export interface AgentResult<T = unknown> {
 export abstract class BaseAgent {
   protected name: string
   protected agentType: PromptAgent
-  protected openai: OpenAI
+  protected llm: OpenAI
   protected logs: string[] = []
   protected startTime: number = 0
 
   constructor(name: string, agentType: PromptAgent) {
     this.name = name
     this.agentType = agentType
-    this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    })
+    this.llm = groq
   }
 
   protected log(message: string): void {
@@ -37,10 +45,24 @@ export abstract class BaseAgent {
     })
 
     if (!template) {
-      throw new Error(`No prompt template found for agent: ${this.agentType}`)
+      // Return a default prompt if none found
+      return this.getDefaultPrompt()
     }
 
     return template.template
+  }
+
+  protected getDefaultPrompt(): string {
+    const prompts: Record<PromptAgent, string> = {
+      COLLECTOR: "You are a news collector agent. Extract and structure news articles from the provided sources.",
+      RANKER: "You are a relevance ranker. Score each article from 1-10 based on importance for crypto trading.",
+      CLUSTERER: "You are an event clusterer. Group related articles into coherent event clusters.",
+      WRITER: "You are a financial writer. Create clear, professional summaries for investors.",
+      RISK_COMPLIANCE: "You are a risk analyst. Identify potential risks and compliance issues.",
+      MONTHLY_SYNTHESIZER: "You are a monthly report synthesizer. Create comprehensive monthly performance reports.",
+      EDITOR_ASSISTANT: "You are an editorial assistant. Help improve and polish content.",
+    }
+    return prompts[this.agentType] || "You are a helpful assistant."
   }
 
   protected async callLLM(
@@ -52,17 +74,22 @@ export abstract class BaseAgent {
       maxTokens?: number
     }
   ): Promise<string> {
-    const response = await this.openai.chat.completions.create({
-      model: options?.model || "gpt-4-turbo-preview",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage },
-      ],
-      temperature: options?.temperature ?? 0.7,
-      max_tokens: options?.maxTokens ?? 4096,
-    })
+    try {
+      const response = await this.llm.chat.completions.create({
+        model: options?.model || DEFAULT_MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userMessage },
+        ],
+        temperature: options?.temperature ?? 0.7,
+        max_tokens: options?.maxTokens ?? 4096,
+      })
 
-    return response.choices[0]?.message?.content || ""
+      return response.choices[0]?.message?.content || ""
+    } catch (error) {
+      this.log(`LLM error: ${error}`)
+      throw error
+    }
   }
 
   protected async callLLMWithJSON<T>(
@@ -74,19 +101,25 @@ export abstract class BaseAgent {
       maxTokens?: number
     }
   ): Promise<T> {
-    const response = await this.openai.chat.completions.create({
-      model: options?.model || "gpt-4-turbo-preview",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage },
-      ],
-      temperature: options?.temperature ?? 0.3,
-      max_tokens: options?.maxTokens ?? 4096,
-      response_format: { type: "json_object" },
-    })
+    try {
+      // Groq supports JSON mode with json_object
+      const response = await this.llm.chat.completions.create({
+        model: options?.model || DEFAULT_MODEL,
+        messages: [
+          { role: "system", content: systemPrompt + "\n\nYou must respond with valid JSON only." },
+          { role: "user", content: userMessage },
+        ],
+        temperature: options?.temperature ?? 0.3,
+        max_tokens: options?.maxTokens ?? 4096,
+        response_format: { type: "json_object" },
+      })
 
-    const content = response.choices[0]?.message?.content || "{}"
-    return JSON.parse(content) as T
+      const content = response.choices[0]?.message?.content || "{}"
+      return JSON.parse(content) as T
+    } catch (error) {
+      this.log(`LLM JSON error: ${error}`)
+      throw error
+    }
   }
 
   protected startTimer(): void {
